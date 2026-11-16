@@ -1,41 +1,90 @@
 # Wireless DeX Research Spike (Experimental)
 
-**Goal:** Determine whether a Linux PC can act as a receiver for the phone's own Wireless DeX button (Miracast over Wi-Fi Direct). **Status: unproven.** Nothing here is known to work. This is a feasibility check, not a feature.
+**Goal:** Tap Wireless DeX on a Samsung phone and get DeX on a Linux PC, with the PC acting as a Miracast receiver (Wi-Fi Direct sink).
 
-Plain Miracast mirroring and DeX mode are different things. Mirroring a phone screen to a Linux sink is plausible with open-source tools. Whether a Linux sink can be accepted by the phone as a *DeX-capable* display is unknown, because the DeX-specific negotiation is not publicly documented.
+**Status: unproven.** On the test laptop (Qualcomm Atheros QCA9377, `ath10k_pci`) the phone has not yet discovered the PC. Nothing in this document is confirmed to work end to end.
 
-## Step 1: Hardware probe
+Work is ordered in two stages, and the second does not start before the first works:
+
+1. **Plain Miracast.** Smart View discovers the PC, connects, and a mirrored picture is shown.
+2. **DeX over Miracast.** Check whether the Wireless DeX page lists the same receiver and whether the phone renders a DeX desktop or only mirrors.
+
+## How MiracleCast drives the adapter
+
+These points come from reading the MiracleCast source at commit `0b7f1f1` (the version packaged as `miraclecast-git 350.0b7f1f1`), not from a successful run.
+
+- `miracle-wifid` starts its own `wpa_supplicant` on the interface (`src/wifi/wifid-supplicant.c`, `supplicant_run`). The upstream README says to stop NetworkManager and the system `wpa_supplicant` first. Two `wpa_supplicant` instances cannot both own the adapter's single P2P device.
+- The output of that `wpa_supplicant` is redirected to the journal under the identifier `miracle-wifid-<interface>-<ifindex>`. `miracle-wifid` itself logs only at `notice` level by default, so a redirected log file stays empty unless `--log-level debug` is passed.
+- `miracle-wifid` restricts P2P to 2.4 GHz (`P2P_SET disallow_freq 5180-5900`). Discovery uses the social channels 1, 6 and 11.
+- `miracle-sinkctl run <link>` sets the Wi-Fi Display information element (`000600111c4400c8`: primary sink, session available, control port 7236) and issues `P2P_FIND`. It accepts incoming group owner negotiation requests automatically.
+- The sink asks the source to send RTP to UDP port 7236 and plays it with `miracle-gst` (GStreamer elements `rtpmp2tdepay`, `tsdemux`, `h264parse`, `avdec_h264`). The player output goes to the journal under `miracle-sinkctl-gst`.
+- `miracle-sinkctl` only prints peers that carry Wi-Fi Display information. A phone is only visible to the PC while the phone itself is scanning (Smart View device list open).
+
+## Step 1: Hardware probe (read-only)
 
 ```bash
 ./scripts/miracast-probe.sh
 ```
 
-The script installs `iw`, `pciutils`, and `usbutils` via `pacman` if they are missing (pass `--no-install` to skip that), then runs the checks.
+Installs `iw`, `pciutils` and `usbutils` via `pacman` if they are missing (pass `--no-install` to skip), then reports P2P support. The output is redacted (MAC, IP, SSID). Without `P2P-GO` and `P2P-client` support a Wi-Fi Direct sink is unlikely on that adapter.
 
-The script is read-only and redacts MAC addresses, IP addresses, and SSIDs. If it reports no `P2P-GO` support, a Wi-Fi Direct sink is unlikely on that adapter, and a P2P-capable USB adapter would be needed.
-
-## Step 2: Try the receiver (one script)
+## Step 2: Preflight (read-only)
 
 Install MiracleCast first (AUR): `yay -S miraclecast-git`. Then run:
 
 ```bash
-./scripts/wireless-dex-sink.sh
+./scripts/miracast-sink.sh --check
 ```
 
-The script releases the Wi-Fi adapter from NetworkManager (**your Wi-Fi on that adapter drops**), starts `miracle-wifid`, sets the friendly name, and runs the sink. Press `Ctrl+C` to stop; it restores NetworkManager and reconnects Wi-Fi. Use `--dry-run` to preview the commands, `--iface <name>` to pick an interface, and `--name <text>` to change the advertised name. If automatic link detection fails, it shows the `miracle-wifictl list` output and asks for the link number. The log is `./wireless-dex-sink.log` and contains MAC/IP data: redact before sharing.
+This changes nothing and Wi-Fi stays up. It prints the NetworkManager state of the adapter, running `wpa_supplicant` processes, the firewall state and any missing GStreamer elements.
 
-On the phone, tap Wireless DeX (or Smart View) and look for `ScrcpyDeX-PC`.
+## Step 3: Run the receiver
 
-Record which of these works: discovery, connection, video shown, and whether the phone enters DeX or only mirrors. The script was written from the tools' `--help-commands` output and tested only with stub binaries in a dry run, so command order may need adjustment on real hardware.
+```bash
+./scripts/miracast-sink.sh
+```
 
-## Step 3: Capture the negotiation (only if the phone connects)
+**Wi-Fi on the adapter drops while this runs.** The script:
 
-Capture on the P2P interface with `tcpdump -i <P2P_INTERFACE> -w session.pcap` (RTSP typically on TCP 7236). Before sharing a capture or notes, replace MAC addresses, IP addresses, device serials, and device names with placeholders (`<MAC>`, `<HOST_IP>`, `<DEVICE_SERIAL>`).
+1. releases the adapter from NetworkManager and stops `wpa_supplicant.service`;
+2. opens UDP 7236 and DHCP in `firewalld` for the duration of the run, if `firewalld` is active;
+3. starts `miracle-wifid` with debug logging, sets the friendly name and runs `miracle-sinkctl`;
+4. on exit (`Ctrl+C`, error, terminal close) stops the daemons, removes the firewall rules, restarts `wpa_supplicant.service`, hands the adapter back to NetworkManager and waits for the connection.
+
+None of these changes are persistent, so a reboot also restores the normal state. If Wi-Fi does not return, run `sudo systemctl restart NetworkManager`.
+
+On the phone, open Smart View, keep the device list open for 60 seconds and look for `Arch-Miracast` (change it with `--name`). Then press `Ctrl+C` on the PC.
+
+### Reading the report
+
+The script prints a report on exit and saves it to `./miracast-sink-report.log` (MAC and IP redacted). The raw log is `./miracast-sink.log` and contains MAC addresses: do not publish it.
+
+| Report field | Meaning |
+| --- | --- |
+| `stale P2P-device wdev=yes` | Another process still held the adapter's P2P device before `miracle-wifid` started. |
+| `p2p_state=none` or `wifi_display=none` | The spawned `wpa_supplicant` did not bring up P2P or Wi-Fi Display. See the problem lines. |
+| `P2P peers seen ... peak=0` | The PC received no P2P probe responses at all. With the phone scanning next to it, this points at the driver or firmware. |
+| `peak>0` but the phone does not list the PC | Discovery works in one direction only. The PC's probe responses are not reaching the phone, or the phone filters the PC. |
+| `go-neg-request>0`, `group-started=0` | The phone tried to connect and group formation failed. |
+| `group-started>0`, no picture | Wi-Fi Direct works. Look at DHCP, the firewall and the player section of the raw log. |
+
+## Step 4: Capture the negotiation (only if the phone connects)
+
+Capture on the P2P interface with `tcpdump -i <P2P_INTERFACE> -w session.pcap` (RTSP on TCP 7236). Before sharing a capture or notes, replace MAC addresses, IP addresses, device serials and device names with placeholders (`<MAC>`, `<HOST_IP>`, `<DEVICE_SERIAL>`).
 
 Questions the capture should answer:
+
 - Which RTSP/WFD parameters does the phone request when the user chose Wireless DeX versus Smart View?
 - Does the phone enable a desktop session, or only mirror?
 - How is input from the PC returned (UIBC or another channel)?
+
+## DeX stage: open questions and leads
+
+None of this is verified.
+
+- **Receiver filtering.** It is unknown whether the Wireless DeX page lists every Miracast sink that Smart View lists, or only sinks with particular Wi-Fi Display attributes.
+- **Mirror or desktop.** Whether the phone renders a DeX desktop for a generic sink is decided on the phone. It has not been observed with a Linux sink in this project.
+- **Wi-Fi Display over an existing network.** `server/src/com/scrcpydex/server/DexActivator.java` starts a Wireless DeX session through Samsung's `SemWifiDisplayConfig` API with `setApConnection(<address>, <port>, <name>, <MAC>)` and `setMode(2)`. This is a Wi-Fi Display session addressed by IP rather than by Wi-Fi Direct. Today it targets `127.0.0.1` and the phone-side code plays the sink role. If the same call accepts the PC's LAN address, the PC could be the sink over the normal Wi-Fi network, with no Wi-Fi Direct and therefore no dependency on `ath10k` P2P support. It would still need `adb` to start the session, so it does not satisfy "tap the Wireless DeX button", but it is a fallback if Wi-Fi Direct cannot be made to work on this adapter.
 
 ## Legal note
 
@@ -43,4 +92,4 @@ Analysis must stay within the interoperability scope described in `LEGAL_AND_LIC
 
 ## Outcomes to report
 
-Share the redacted probe report and the result of each step in Step 2. That determines whether further work is worthwhile.
+Share the preflight output and the report from Step 3, plus what the phone showed: whether Smart View listed the PC, whether tapping it connected, and whether a picture appeared.
