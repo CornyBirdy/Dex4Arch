@@ -51,11 +51,11 @@ This changes nothing and Wi-Fi stays up. It prints the NetworkManager state of t
 1. releases the adapter from NetworkManager and stops `wpa_supplicant.service`;
 2. opens UDP 7236 and DHCP in `firewalld` for the duration of the run, if `firewalld` is active;
 3. starts `miracle-wifid` with debug logging, sets the friendly name and runs `miracle-sinkctl`;
-4. on exit (`Ctrl+C`, error, terminal close) stops the daemons, removes the firewall rules, restarts `wpa_supplicant.service`, hands the adapter back to NetworkManager and waits for the connection.
+4. on exit (viewer closed, `quit`, error, terminal close) stops the daemons, removes the firewall rules, restarts `wpa_supplicant.service`, hands the adapter back to NetworkManager and waits for the connection.
 
 None of these changes are persistent, so a reboot also restores the normal state. If Wi-Fi does not return, run `sudo systemctl restart NetworkManager`.
 
-On the phone, open Smart View, keep the device list open for 60 seconds and look for `Arch-Miracast` (change it with `--name`). Then press `Ctrl+C` on the PC.
+On the phone, open Smart View, keep the device list open for 60 seconds and look for `Arch-Miracast` (change it with `--name`). Then end the session by closing the viewer or typing `quit` in the terminal.
 
 ### Reading the report
 
@@ -79,6 +79,27 @@ Questions the capture should answer:
 - Which RTSP/WFD parameters does the phone request when the user chose Wireless DeX versus Smart View?
 - Does the phone enable a desktop session, or only mirror?
 - How is input from the PC returned (UIBC or another channel)?
+
+## Full screen viewer and mouse/keyboard input (UIBC)
+
+`miracast-sink.sh` runs `miracle-sinkctl --uibc` with a temporary configuration (a private `HOME` containing `.miraclecastrc`) that sets:
+
+- `external-player` to `scripts/miracast-player.sh`, which drops root and starts `scripts/miracast-viewer.py` as the desktop user;
+- `extends.wfd_uibc_capability` to `input_category_list=HIDC;generic_cap_list=none;hidc_cap_list=Keyboard/USB, Mouse/USB;port=none`.
+
+MiracleCast's own UIBC client only implements the Generic category with touch down/up and key events, which has no pointer movement or right button. DeX needs a relative mouse with several buttons and a keyboard, so the viewer implements the HIDC category itself:
+
+- UIBC header: version 0, no timestamp, input category 1 (HIDC), 16-bit total length.
+- HIDC body: input path 1 (USB), HID type (0 keyboard, 1 mouse), usage (0 report, 1 report descriptor), 16-bit length, HID data.
+- After connecting to the source's UIBC port, the viewer sends a report descriptor for a 5-button wheel mouse and for a boot-compatible keyboard, then input reports.
+- The mouse is relative: the pointer is grabbed, hidden and re-centred after every motion event. Ctrl+Alt releases the grab.
+- Keys are mapped from Linux evdev codes to HID usages using the kernel's `usbkbd.c` table.
+
+The packet format was checked against a local test listener only. Whether Samsung's source accepts HIDC from this sink, and whether it needs the descriptors, is not yet known. If the phone answers the capability with `none`, the viewer runs video only and logs `UIBC not offered by the phone`. A Generic-category fallback (absolute pointer, no right button) is a possible next step.
+
+Closing the viewer ends the session: the player wrapper sends SIGTERM to `miracle-sinkctl`, which exits, and the main script restores Wi-Fi. `Ctrl+C` is not a reliable way to stop, because `miracle-sinkctl` handles SIGINT by clearing its input line (`src/ctl/ctl-cli.c`, `cli_signal_fn`).
+
+`scripts/install-launcher.sh` adds a desktop menu entry that runs the receiver in a terminal.
 
 ## DeX stage: open questions and leads
 

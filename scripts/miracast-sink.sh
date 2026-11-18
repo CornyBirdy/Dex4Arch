@@ -9,15 +9,21 @@
 # WARNING: Wi-Fi on the chosen adapter drops while this runs. The adapter is
 # released from NetworkManager and the system wpa_supplicant service is stopped,
 # because miracle-wifid starts its own wpa_supplicant. Both are restored on exit
-# (Ctrl+C, error, terminal close or normal end). Nothing is changed permanently:
+# (viewer closed, "quit", error, terminal close). Nothing is changed permanently:
 # a reboot also restores everything.
 #
 # Requires: miraclecast-git (AUR), networkmanager, iw, wpa_supplicant (wpa_cli).
 # Run as a normal user; sudo is used where root is needed.
 #
-# Usage:  ./miracast-sink.sh [--check] [--iface wlan0] [--name Arch-Miracast] [--audio]
-#   --check   read-only preflight: prints facts, changes nothing, Wi-Fi stays up
-#   --audio   enable audio (off by default because the sink runs as root)
+# Usage:  ./miracast-sink.sh [--check] [--iface wlan0] [--name Arch-Miracast]
+#                            [--no-audio] [--no-input] [--pause-at-exit]
+#   --check          read-only preflight: prints facts, changes nothing, Wi-Fi stays up
+#   --no-audio       do not play the phone's audio on the laptop
+#   --no-input       plain MiracleCast player: no full screen viewer, no mouse/keyboard
+#   --pause-at-exit  wait for Enter before the window closes (used by the menu launcher)
+#
+# Stop:   close the viewer (Ctrl+Alt to release the mouse, then Ctrl+Q), or type
+#         quit in this terminal and press Enter.
 #
 # Files:  ./miracast-sink.log          raw log, contains MAC addresses: do not publish
 #         ./miracast-sink-report.log   the report, MAC/IP redacted
@@ -26,8 +32,12 @@ set -uo pipefail
 
 IFACE=""
 NAME="Arch-Miracast"
-AUDIO=0
+AUDIO=1
+INPUT=1
+PAUSE_AT_EXIT=0
 CHECK_ONLY=0
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+CONF_HOME=""
 LOG="$PWD/miracast-sink.log"
 REPORT="$PWD/miracast-sink-report.log"
 CTRL_DIR="/run/miracle/wifi"
@@ -54,8 +64,11 @@ while [ $# -gt 0 ]; do
         --iface) IFACE="${2:-}"; shift 2 ;;
         --name)  NAME="${2:-}"; shift 2 ;;
         --audio) AUDIO=1; shift ;;
+        --no-audio) AUDIO=0; shift ;;
+        --no-input) INPUT=0; shift ;;
+        --pause-at-exit) PAUSE_AT_EXIT=1; shift ;;
         --check) CHECK_ONLY=1; shift ;;
-        -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -102,6 +115,22 @@ missing_gst() {
     echo "${out:- none}"
 }
 
+viewer_check() {
+    local out
+    have setpriv || { echo "setpriv missing (util-linux)"; return; }
+    out="$("${MIRACAST_PYTHON:-/usr/bin/python3}" - <<'PYCHECK' 2>&1 | tail -n 1
+import gi
+gi.require_version("Gtk", "3.0"); gi.require_version("Gst", "1.0")
+gi.require_version("GstVideo", "1.0"); gi.require_version("GdkX11", "3.0")
+from gi.repository import Gtk, Gst, GstVideo, GdkX11
+Gst.init(None)
+sinks = [n for n in ("xvimagesink", "gtksink", "ximagesink") if Gst.ElementFactory.find(n)]
+print("ok, video sinks: " + (", ".join(sinks) or "none"))
+PYCHECK
+)"
+    echo "${out:-python3 check failed}"
+}
+
 static_facts() {
     local driver regdom pkg
     driver="$(basename "$(readlink -f "/sys/class/net/$IFACE/device/driver" 2>/dev/null)" 2>/dev/null)"
@@ -128,6 +157,7 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
     echo "P2P-device wdev present now: $(yesno p2p_wdev_present)"
     echo "miracle-wifid already running: $(yesno pgrep --exact miracle-wifid)"
     echo "missing GStreamer elements:$(missing_gst)"
+    echo "viewer: $(viewer_check)"
     echo "DISPLAY=${DISPLAY:-unset} Xauthority file found: $(yesno test -r "${XAUTHORITY:-$HOME/.Xauthority}")"
     echo "rfkill: $(rfkill list wifi 2>/dev/null | grep -ciE 'blocked: yes') blocked entries"
     echo "A real run would: unmanage $IFACE in NetworkManager, stop and runtime-mask wpa_supplicant.service,"
@@ -204,6 +234,8 @@ print_report() {
          "group-removed=$(count_log 'P2P-GROUP-REMOVED') find-failed=$(count_log 'P2P_FIND failed')"
     echo "wpa_supplicant problem lines: $(printf '%s' "$errs" | grep -c . || true) distinct; first 6:"
     printf '%s\n' "$errs" | head -n 6 | cut -c1-110 | sed 's/^/  /'
+    echo "viewer: $(sed -n '/^===== player/,/^===== kernel/p' "$LOG" | grep -cE '^(viewer|player):' || true) lines; last 6:"
+    sed -n '/^===== player/,/^===== kernel/p' "$LOG" | grep -E '^(viewer|player):' | tail -n 6 | cut -c1-110 | sed 's/^/  /'
     echo "kernel Wi-Fi lines during run: $(printf '%s' "$kern" | grep -c . || true); last 3:"
     printf '%s\n' "$kern" | tail -n 3 | cut -c1-110 | sed 's/^/  /'
     echo "network after restore: $IFACE = $(nmcli --get-values GENERAL.STATE device show "$IFACE" 2>/dev/null)"
@@ -221,6 +253,8 @@ cleanup() {
     live_state
     if [ -n "$SAMPLER_PID" ]; then kill "$SAMPLER_PID" 2>/dev/null || true; fi
     sudo pkill --exact miracle-sinkctl 2>/dev/null || true
+    sudo pkill -f 'miracast-player[.]sh' 2>/dev/null || true
+    pkill -f 'miracast-viewer[.]py' 2>/dev/null || true
     sudo pkill --exact miracle-wifid 2>/dev/null || true
     for _ in 1 2 3 4 5 6; do pgrep --exact miracle-wifid >/dev/null 2>&1 || break; sleep 0.5; done
     sudo pkill --signal KILL --exact miracle-wifid 2>/dev/null || true
@@ -240,8 +274,12 @@ cleanup() {
     fi
     append_journals
     print_report | redact | tee "$REPORT"
+    if [ -n "$CONF_HOME" ]; then rm -rf "$CONF_HOME" 2>/dev/null || true; fi
     say "Photograph the report above. Raw log: $LOG (has MAC addresses, do not publish)."
     say "If Wi-Fi is not back within a minute, run: sudo systemctl restart NetworkManager"
+    if [ "$PAUSE_AT_EXIT" -eq 1 ]; then
+        read -r -p "[miracast] Press Enter to close this window. " _ || true
+    fi
 }
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM HUP
@@ -349,20 +387,35 @@ SAMPLER_PID=$!
 
 cat <<MSG
 
-[miracast] Receiver "$NAME" is starting.
-  1. On the phone open Smart View and keep its device list open for 60 seconds.
-  2. If "$NAME" appears, tap it and wait 30 seconds.
-  3. Press Ctrl+C here. A report is printed: photograph it.
-  Lines such as "[ADD] Peer" below mean the laptop sees a Miracast device.
+[miracast] Receiver "$NAME" is ready.
+  On the phone: Settings > Connected devices > Samsung DeX > Connect wirelessly
+  (or Smart View), then pick "$NAME".
+  In the viewer: click the picture to use your mouse and keyboard on the phone.
+    Ctrl+Alt gives them back to the laptop. Then F11 = full screen, Ctrl+Q = quit.
+  To stop: close the viewer, or type  quit  here and press Enter.
+  (Ctrl+C here only clears the input line of miracle-sinkctl.)
 
 MSG
 
-# Foreground: runs the sink until Ctrl+C. Root is required, so the X11 display
-# variables are passed explicitly for the video window.
-step sink-run
-SINK_ENV=("DISPLAY=${DISPLAY:-:0}" "XAUTHORITY=${XAUTHORITY:-$HOME/.Xauthority}")
-if [ "$AUDIO" -eq 1 ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-    SINK_ENV+=("XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR")
+# miracle-sinkctl reads its configuration from $HOME, so a private HOME holds a
+# temporary config: the full screen viewer as external player, and a UIBC
+# capability that offers USB HID keyboard and mouse (HIDC) to the phone.
+SINK_ARGS=(--audio "$AUDIO")
+SINK_ENV=("DISPLAY=${DISPLAY:-:0}" "XAUTHORITY=${XAUTHORITY:-$HOME/.Xauthority}" "MIRACAST_USER=$USER")
+if [ -n "${MIRACAST_PYTHON:-}" ]; then SINK_ENV+=("MIRACAST_PYTHON=$MIRACAST_PYTHON"); fi
+if [ "$INPUT" -eq 1 ]; then
+    CONF_HOME="$(mktemp -d "${TMPDIR:-/tmp}/miracast-conf.XXXXXX")"
+    cat > "$CONF_HOME/.miraclecastrc" <<CONF
+[sinkctl]
+external-player=$SCRIPT_DIR/miracast-player.sh
+extends.wfd_uibc_capability=input_category_list=HIDC;generic_cap_list=none;hidc_cap_list=Keyboard/USB, Mouse/USB;port=none
+CONF
+    chmod 755 "$CONF_HOME"
+    chmod 644 "$CONF_HOME/.miraclecastrc"
+    SINK_ENV+=("HOME=$CONF_HOME")
+    SINK_ARGS+=(--uibc)
 fi
-sudo env "${SINK_ENV[@]}" miracle-sinkctl --audio "$AUDIO" run "$LINK_ID"
+
+step sink-run
+sudo env "${SINK_ENV[@]}" miracle-sinkctl "${SINK_ARGS[@]}" run "$LINK_ID"
 say "miracle-sinkctl exited with code $?."

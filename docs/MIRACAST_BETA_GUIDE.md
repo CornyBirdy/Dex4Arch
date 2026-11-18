@@ -1,147 +1,135 @@
 # Miracast Receiver: Beta Test Guide
 
-This guide covers one test run of `scripts/miracast-sink.sh` from the `beta` branch. The goal of this run is to find out whether the phone's Smart View can discover the laptop. DeX is not part of this test.
+This guide covers the `beta` branch: the laptop acts as a Miracast receiver for the phone's Wireless DeX (or Smart View), shows the picture in a full screen viewer, and sends the laptop's mouse and keyboard to the phone.
 
-**Status: untested on real hardware.** The script has only been run against stub programs. Expect problems, and report what you see.
+**Status.** Discovery and connection have worked once on the test laptop. The full screen viewer and the mouse/keyboard input are new and have only been tested on a development machine with a simulated phone. Whether the phone accepts the laptop's mouse and keyboard is not known yet.
 
 ## Before you start
 
-- **Open this guide on the phone.** The laptop's Wi-Fi goes down during step 9, so the laptop cannot show this page then.
-- **Know your sudo password.** The script asks for it once near the start.
-- **Keep the phone within 1 m of the laptop**, with Wi-Fi switched on. The phone does not need to be on the same network.
-- **Plug in the laptop charger.** Power saving can put the Wi-Fi adapter to sleep.
-- **Have the camera ready.** Steps 8 and 14 each need a photo of the terminal.
+- **Open this guide on the phone.** The laptop's Wi-Fi goes down while the receiver runs.
+- **Know your sudo password.** The script asks for it once near the start. The script is not finished when the password prompt appears: type the password and press Enter.
+- **Keep the phone close to the laptop**, with Wi-Fi switched on.
+- **Plug in the laptop charger.**
 
-Commands are written with long options (`--oneline`, `--check`) so that `l` and `1` cannot be confused. None of the commands in this guide contain the digit `1`.
+Commands use long options (`--oneline`, `--check`) so that `l` and `1` cannot be confused.
 
-## Part A: Get the beta version (Wi-Fi stays on)
+## Part A: Get the latest beta version (Wi-Fi stays on)
 
-**Step 1.** Open a terminal and go to the project folder. Change the path if your copy is somewhere else.
-
-```bash
-cd ~/ScrcpyDex4Arch
-```
-
-**Step 2.** Check that there are no local changes that would block switching branches.
+**Step 1.** Go to the project folder. Change the path if your copy is somewhere else.
 
 ```bash
-git status
+cd ~/Music/Dex4Arch
 ```
 
-If it lists changed files you want to keep, stop and report them. Files ending in `.log` are ignored by git and do not matter.
-
-**Step 3.** Download the `beta` branch.
-
-```bash
-git fetch origin beta
-```
-
-**Step 4.** Switch to it.
-
-```bash
-git switch beta
-```
-
-If git says `invalid reference: beta`, use this instead:
-
-```bash
-git switch --track origin/beta
-```
-
-**Step 5.** Confirm you are on the right version.
-
-```bash
-git log --oneline --max-count=3
-```
-
-The list should include a line ending in `rework Miracast sink script with diagnostics and report`.
-
-**Step 6.** Make sure the script can be executed. This is harmless if it already can.
-
-```bash
-chmod +x scripts/miracast-sink.sh
-```
-
-**Already on `beta` from an earlier test?** Skip steps 3 to 6 and download the latest version instead:
+**Step 2.** If you are already on `beta`, download the latest version:
 
 ```bash
 git pull
 ```
 
+If you are not on `beta` yet, run these two instead:
+
+```bash
+git fetch origin beta
+```
+
+```bash
+git switch beta
+```
+
+**Step 3.** Confirm the version. The list should include a line ending in `add full screen viewer with mouse and keyboard input`.
+
+```bash
+git log --oneline --max-count=3
+```
+
 ## Part B: Preflight (read-only, Wi-Fi stays on)
 
-**Step 7.** Run the check. It changes nothing.
+**Step 4.** Run the check. It changes nothing.
 
 ```bash
 ./scripts/miracast-sink.sh --check
 ```
 
-**Step 8.** Photograph the whole block, from `MIRACAST PREFLIGHT` down to the closing line of `=` signs.
+**Step 5.** Look at the line starting with `viewer:`.
 
-Look at the line `missing GStreamer elements:`. If it lists anything other than `none`, the picture will not be shown later even if discovery works. Run step 9 anyway, because discovery is what this test is for, and report the missing names.
+- `ok, video sinks: xvimagesink, ...` means the viewer can run.
+- Anything else means a package is missing. Install the viewer's dependencies, then run step 4 again:
 
-## Part C: The receiver run (Wi-Fi goes down)
+```bash
+sudo pacman -S --needed python-gobject gtk3 gst-plugins-base gst-libav libnotify
+```
 
-**Step 9.** Start the receiver. **The laptop's Wi-Fi and internet go down now** and come back when the script ends.
+## Part C: Run the receiver (Wi-Fi goes down)
+
+**Step 6.** Start the receiver. **The laptop's Wi-Fi drops now** and comes back when the session ends.
 
 ```bash
 ./scripts/miracast-sink.sh
 ```
 
-Enter your sudo password when asked.
+Enter your sudo password when asked. Wait for `Receiver "Arch-Miracast" is ready.`
 
-**Step 10.** Wait until the terminal shows:
+**Step 7.** On the phone: **Settings > Connected devices > Samsung DeX > Connect wirelessly**, then tap `Arch-Miracast`.
 
-```
-[miracast] Receiver "Arch-Miracast" is starting.
-```
+**Step 8.** A full screen window with the phone's picture opens on the laptop. Note whether it shows the DeX desktop or a copy of the phone screen.
 
-This normally takes 5 to 20 seconds. If the script stops with `[miracast][ERROR]` instead, photograph the screen and go to step 15.
+**Step 9.** Click once inside the picture. The laptop's cursor disappears, and your mouse and keyboard now control the phone. Try:
 
-**Step 11.** On the phone, swipe down twice to open the quick panel and tap **Smart View**. Keep the device list open for a full 60 seconds. Do not tap anything else during that time.
+- moving the mouse, and left- and right-clicking;
+- scrolling with the touchpad or mouse wheel;
+- typing in a text field;
+- the Windows (Super) key, which opens the DeX app list.
 
-Then close Smart View, open **Settings > Connected devices > Samsung DeX**, tap **Connect wirelessly** and keep that list open for another 60 seconds. Both pages search for Miracast receivers; checking both shows whether the DeX page filters receivers.
+**Step 10.** Press **Ctrl+Alt** to give the mouse and keyboard back to the laptop. While they are released:
 
-While you wait, watch the laptop terminal. A line containing `[ADD] Peer` means the laptop can see the phone.
+| Key | Action |
+| --- | --- |
+| Click the picture | Control the phone again |
+| F11 | Leave or enter full screen |
+| Ctrl+Q | Close the viewer and end the session |
 
-**Step 12.** Note what the phone shows:
+## Part D: End the session
 
-- **`Arch-Miracast` appears in the list.** Tap it, then wait 30 seconds. Note any message on the phone, such as "Connecting", "Couldn't connect" or a PIN prompt. If a PIN appears, photograph it and do not type anything.
-- **`Arch-Miracast` does not appear after 60 seconds.** That is a useful result. Continue to step 13.
+**Step 11.** End the session in one of these ways:
 
-**Step 13.** On the laptop, press `Ctrl+C` **once**. Do not close the terminal window.
+- press **Ctrl+Alt**, then **Ctrl+Q** in the viewer; or
+- type `quit` in the terminal and press Enter.
 
-**Step 14.** Wait up to 30 seconds. A block headed `MIRACAST SINK REPORT` appears. Photograph all of it. If it does not fit on screen, take two photos, or scroll up and photograph the top half too.
+Do not rely on `Ctrl+C` in the terminal. According to the MiracleCast source, `miracle-sinkctl` treats it as "clear the input line" and keeps running.
 
-The report is also saved as `miracast-sink-report.log` in the project folder, with MAC and IP addresses removed. The script prints the exact path near the start of the run (`Report will be saved to:`). If you cannot find it later, search for it:
+**Step 12.** Wait for the `MIRACAST SINK REPORT` block in the terminal and photograph all of it. Look at the `viewer:` lines near the bottom. They show whether the phone opened the input channel (`UIBC connected` or `did not enable input`).
 
-```bash
-find ~ -name "miracast-sink*"
-```
-
-## Part D: Check the laptop is back to normal
-
-**Step 15.** Check that Wi-Fi has reconnected. The last line of the report shows the state, and `100 (connected)` means it is back. You can also check with:
-
-```bash
-nmcli device status
-```
-
-**Step 16.** If Wi-Fi is not back after a minute, restart NetworkManager:
+**Step 13.** Wi-Fi should reconnect by itself. If it has not after a minute:
 
 ```bash
 sudo systemctl restart NetworkManager
 ```
 
-If that does not help, reboot. The script makes no permanent changes, so a reboot restores everything.
+## Part E: Add it to the start menu (optional)
+
+**Step 14.** Install the menu entry. This only writes one file in your home folder.
+
+```bash
+./scripts/install-launcher.sh
+```
+
+Open the application menu and search for **Miracast**. The entry opens a terminal for the sudo password and the report. After the session it waits for Enter before the terminal closes.
+
+To remove the entry:
+
+```bash
+./scripts/install-launcher.sh --remove
+```
+
+If you move the project folder, run the install command again.
 
 ## What to send back
 
-1. The photo of the preflight output (step 8).
-2. The photo or photos of the report (step 14).
-3. Whether `[ADD] Peer` lines appeared on the laptop (step 11).
-4. Whether Smart View listed `Arch-Miracast`, and what happened if you tapped it (step 12).
-5. Whether Wi-Fi came back on its own (step 15).
+1. Whether the laptop showed the **DeX desktop** or only **mirrored** the phone screen.
+2. Whether the mouse moved the pointer on the phone, and whether clicking, right-clicking, scrolling and typing worked.
+3. A photo of the report, especially the `viewer:` lines.
+4. Whether the picture was smooth or laggy.
 
 Do not send `miracast-sink.log`. It contains real MAC addresses. Only the report has them removed.
 
@@ -149,12 +137,12 @@ Do not send `miracast-sink.log`. It contains real MAC addresses. Only the report
 
 | What you see | What to do |
 | --- | --- |
-| `'miracle-wifid' not found` or a similar missing-program message | Photograph it and report it. Do not install anything yet. |
-| `miracle-wifid did not list wlan0 as a link` | Photograph the screen. Wi-Fi is restored automatically. |
-| `wpa_supplicant did not report a P2P state within 15 s` | Not fatal. Continue with step 11 so the report can show why. |
-| A video window opens but stays black | Wait 30 seconds, then continue with step 13. Report that a window appeared. |
-| The terminal stops responding after `Ctrl+C` | Wait a full minute, then press `Ctrl+C` once more. |
-| You closed the terminal by mistake | Run step 16. |
+| The viewer says the phone did not enable input | The phone refused the laptop's mouse/keyboard offer. Send the report; another input mode can be tried. |
+| Clicking the picture shows `No input channel to the phone` | The input connection failed. Send the report. |
+| The mouse is stuck inside the viewer | Press Ctrl+Alt. If that does not help, type `quit` in the terminal (Alt+Tab to reach it). |
+| No window appears but the phone says connected | Send the report. The viewer messages explain why. To test without the viewer, run `./scripts/miracast-sink.sh --no-input`. |
+| No sound | Sound plays by default. Use `--no-audio` to turn it off if it causes problems. |
+| You closed the terminal by mistake | Run the NetworkManager restart in step 13. |
 
 ## Going back to the main version
 
