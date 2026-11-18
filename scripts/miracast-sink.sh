@@ -23,6 +23,10 @@
 #   --res MODE       resolution offered to the phone: auto (default, fits this
 #                    screen), WxH (for example 1280x720), or all (MiracleCast default)
 #   --max-fps N      highest frame rate offered: 60 (default) or 30 (lighter on the CPU)
+#   --decoder NAME   H.264 decoder for the viewer: auto (default: hardware if
+#                    available), vah264dec, vaapih264dec or avdec_h264 (software)
+#   --mouse-speed X  multiply mouse movement sent to the phone (default 1.0)
+#   --windowed       start the viewer in a window instead of full screen
 #   --pause-at-exit  wait for Enter before the window closes (used by the menu launcher)
 #
 # Stop:   close the viewer (Ctrl+Alt to release the mouse, then Ctrl+Q), or type
@@ -40,6 +44,7 @@ INPUT=1
 PAUSE_AT_EXIT=0
 RES_MODE="auto"
 MAX_FPS=60
+VIEWER_OPTS=()
 RES_INFO="MiracleCast default"
 CHECK_ONLY=0
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -74,9 +79,12 @@ while [ $# -gt 0 ]; do
         --no-input) INPUT=0; shift ;;
         --res) RES_MODE="${2:-}"; shift 2 ;;
         --max-fps) MAX_FPS="${2:-}"; shift 2 ;;
+        --decoder) VIEWER_OPTS+=(--decoder "${2:-auto}"); shift 2 ;;
+        --mouse-speed) VIEWER_OPTS+=(--mouse-speed "${2:-1.0}"); shift 2 ;;
+        --windowed) VIEWER_OPTS+=(--windowed); shift ;;
         --pause-at-exit) PAUSE_AT_EXIT=1; shift ;;
         --check) CHECK_ONLY=1; shift ;;
-        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,37p' "$0"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -236,6 +244,9 @@ resolve_formats() {
 }
 
 [[ "$MAX_FPS" =~ ^[0-9]+$ ]] || die "--max-fps needs a number, for example 30."
+for opt in "${VIEWER_OPTS[@]}"; do
+    [[ "$opt" =~ ^[A-Za-z0-9_.-]+$ ]] || die "Unexpected viewer option value: $opt"
+done
 [[ "$RES_MODE" =~ ^(auto|all|[0-9]+x[0-9]+)$ ]] || die "--res must be auto, all, or WxH (for example 1280x720)."
 
 # --- Facts that can be collected without changing anything ---------------------
@@ -262,6 +273,18 @@ print("ok, video sinks: " + (", ".join(sinks) or "none"))
 PYCHECK
 )"
     echo "${out:-python3 check failed}"
+}
+
+decoder_check() {
+    local d out=""
+    have gst-inspect-1.0 || { echo "gst-inspect-1.0 missing"; return; }
+    for d in vah264dec vaapih264dec avdec_h264; do
+        if gst-inspect-1.0 --exists "$d" >/dev/null 2>&1; then out="$out $d"; fi
+    done
+    case "$out" in
+        *vah264dec*|*vaapih264dec*) echo "${out# } (hardware decoding available)" ;;
+        *) echo "${out# } (software only: see the guide for hardware decoding packages)" ;;
+    esac
 }
 
 static_facts() {
@@ -291,6 +314,7 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
     echo "miracle-wifid already running: $(yesno pgrep --exact miracle-wifid)"
     echo "missing GStreamer elements:$(missing_gst)"
     echo "viewer: $(viewer_check)"
+    echo "H.264 decoders: $(decoder_check)"
     resolve_formats
     echo "resolution offered: $RES_INFO"
     echo "DISPLAY=${DISPLAY:-unset} Xauthority file found: $(yesno test -r "${XAUTHORITY:-$HOME/.Xauthority}")"
@@ -342,7 +366,7 @@ append_journals() {
 }
 
 print_report() {
-    local fw peak errs kern syswpa steps
+    local fw peak errs kern syswpa steps vlines
     fw="$(sudo journalctl --dmesg --boot --output=cat --no-pager 2>/dev/null | grep -m 1 -oE 'firmware ver [^ ]+' || true)"
     syswpa="$(grep -c 'sys_wpa=yes' "$LOG" 2>/dev/null || true)"
     steps="$(grep -oE '^STEP [0-9]+ [a-z0-9-]+' "$LOG" 2>/dev/null | awk '{print $3}' | tr '\n' ' ')"
@@ -370,8 +394,11 @@ print_report() {
          "group-removed=$(count_log 'P2P-GROUP-REMOVED') find-failed=$(count_log 'P2P_FIND failed')"
     echo "wpa_supplicant problem lines: $(printf '%s' "$errs" | grep -c . || true) distinct; first 6:"
     printf '%s\n' "$errs" | head -n 6 | cut -c1-110 | sed 's/^/  /'
-    echo "viewer: $(sed -n '/^===== player/,/^===== kernel/p' "$LOG" | grep -cE '^(viewer|player):' || true) lines; last 6:"
-    sed -n '/^===== player/,/^===== kernel/p' "$LOG" | grep -E '^(viewer|player):' | tail -n 6 | cut -c1-110 | sed 's/^/  /'
+    vlines="$(sed -n '/^===== player/,/^===== kernel/p' "$LOG" | grep -E '^(viewer|player):' || true)"
+    echo "viewer: $(printf '%s' "$vlines" | grep -c . || true) lines; key lines:"
+    printf '%s\n' "$vlines" | grep -vE 'stats:|Controlling|Released|Click the picture' | tail -n 6 | cut -c1-110 | sed 's/^/  /'
+    echo "viewer performance (first and last full interval):"
+    printf '%s\n' "$vlines" | grep 'stats:' | sed -n '2p;$p' | sed 's/^viewer: stats: //' | cut -c1-110 | sed 's/^/  /'
     echo "kernel Wi-Fi lines during run: $(printf '%s' "$kern" | grep -c . || true); last 3:"
     printf '%s\n' "$kern" | tail -n 3 | cut -c1-110 | sed 's/^/  /'
     echo "network after restore: $IFACE = $(nmcli --get-values GENERAL.STATE device show "$IFACE" 2>/dev/null)"
@@ -539,6 +566,7 @@ MSG
 SINK_ARGS=(--audio "$AUDIO")
 SINK_ENV=("DISPLAY=${DISPLAY:-:0}" "XAUTHORITY=${XAUTHORITY:-$HOME/.Xauthority}" "MIRACAST_USER=$USER")
 if [ -n "${MIRACAST_PYTHON:-}" ]; then SINK_ENV+=("MIRACAST_PYTHON=$MIRACAST_PYTHON"); fi
+if [ "${#VIEWER_OPTS[@]}" -gt 0 ]; then SINK_ENV+=("MIRACAST_VIEWER_OPTS=${VIEWER_OPTS[*]}"); fi
 resolve_formats
 CONF_LINES=()
 if [ -n "$VIDEO_FORMATS" ]; then

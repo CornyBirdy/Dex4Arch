@@ -45,3 +45,7 @@ dex_capture.log
 *.zip
 ScrcpyDeX.exe
 SHA256SUMS.txt
+
+# Python bytecode
+__pycache__/
+*.pyc

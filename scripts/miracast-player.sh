@@ -48,6 +48,12 @@ if [ -z "$PYTHON" ]; then
     if [ -x /usr/bin/python3 ]; then PYTHON=/usr/bin/python3; else PYTHON=python3; fi
 fi
 
+# Viewer options chosen in miracast-sink.sh (--decoder, --mouse-speed, --windowed).
+extra=()
+if [ -n "${MIRACAST_VIEWER_OPTS:-}" ]; then
+    read -r -a extra <<< "$MIRACAST_VIEWER_OPTS"
+fi
+
 stopping=0
 child=""
 on_signal() {
@@ -56,9 +62,9 @@ on_signal() {
 }
 trap on_signal TERM INT HUP
 
-log "starting viewer as $TARGET_USER with: $*"
+log "starting viewer as $TARGET_USER with: $* ${extra[*]}"
 setpriv --reuid="$uid" --regid="$gid" --init-groups \
-    env -i "${env_args[@]}" "$PYTHON" "$VIEWER" "$@" &
+    env -i "${env_args[@]}" "$PYTHON" "$VIEWER" "$@" "${extra[@]}" &
 child=$!
 
 rc=0

@@ -99,6 +99,21 @@ The packet format was checked against a local test listener only. Whether Samsun
 
 Closing the viewer ends the session: the player wrapper sends SIGTERM to `miracle-sinkctl`, which exits, and the main script restores Wi-Fi. `Ctrl+C` is not a reliable way to stop, because `miracle-sinkctl` handles SIGINT by clearing its input line (`src/ctl/ctl-cli.c`, `cli_signal_fn`).
 
+### Input and video latency
+
+Changes after the first test on the laptop (input felt unreliable, about half a second of delay):
+
+- GTK motion event compression is disabled on the viewer's window. With compression on, the event produced by re-centring the pointer could be merged with real movement, which produced wrong or cancelled deltas.
+- The pointer is re-centred only near the window edges, and movement is measured from the last position until the re-centring event arrives, so deltas stay exact. A local test sent 300 relative moves and the test listener received exactly the expected totals.
+- Reports are sent by a background thread. A slow reader on the phone side no longer blocks the GTK thread; while packets are backlogged, consecutive movements with the same buttons are merged.
+- The viewer prefers a VA-API hardware decoder (`vah264dec`, then `vaapih264dec`) and falls back to `avdec_h264` if the hardware decoder cannot be linked or fails.
+- After the decoder, a leaky two-frame queue drops old frames instead of adding delay. Compressed data is never dropped.
+- `tsdemux latency` is lowered from 700 ms to 100 ms, so that audio is not held back that long.
+- The window sets `_NET_WM_BYPASS_COMPOSITOR` and asks to stay above other windows while full screen.
+- A `stats:` line every 10 s logs decoded frames per second, the compressed-video backlog in front of the decoder, and input packet flow. The report shows the first and last of these.
+
+Not verified: how much of the observed delay comes from the phone's encoder and Wi-Fi, which the receiver cannot change.
+
 ### Resolution
 
 MiracleCast offers every CEA, VESA and HH mode up to 1920x1080 by default, so the phone picks 1080p. `miracast-sink.sh --res auto` (the default) reads the screen size with `xrandr` (primary output) and writes `extends.wfd_video_formats` into the temporary config. It uses the same layout as MiracleCast's default string, with only the native mode byte and the three masks changed:
