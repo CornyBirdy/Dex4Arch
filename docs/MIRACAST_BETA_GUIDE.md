@@ -62,6 +62,12 @@ The list should include a line ending in `rework Miracast sink script with diagn
 chmod +x scripts/miracast-sink.sh
 ```
 
+**Already on `beta` from an earlier test?** Skip steps 3 to 6 and download the latest version instead:
+
+```bash
+git pull
+```
+
 ## Part B: Preflight (read-only, Wi-Fi stays on)
 
 **Step 7.** Run the check. It changes nothing.
@@ -94,6 +100,8 @@ This normally takes 5 to 20 seconds. If the script stops with `[miracast][ERROR]
 
 **Step 11.** On the phone, swipe down twice to open the quick panel and tap **Smart View**. Keep the device list open for a full 60 seconds. Do not tap anything else during that time.
 
+Then close Smart View, open **Settings > Connected devices > Samsung DeX**, tap **Connect wirelessly** and keep that list open for another 60 seconds. Both pages search for Miracast receivers; checking both shows whether the DeX page filters receivers.
+
 While you wait, watch the laptop terminal. A line containing `[ADD] Peer` means the laptop can see the phone.
 
 **Step 12.** Note what the phone shows:
@@ -105,7 +113,11 @@ While you wait, watch the laptop terminal. A line containing `[ADD] Peer` means 
 
 **Step 14.** Wait up to 30 seconds. A block headed `MIRACAST SINK REPORT` appears. Photograph all of it. If it does not fit on screen, take two photos, or scroll up and photograph the top half too.
 
-The report is also saved as `miracast-sink-report.log` in the project folder, with MAC and IP addresses removed.
+The report is also saved as `miracast-sink-report.log` in the project folder, with MAC and IP addresses removed. The script prints the exact path near the start of the run (`Report will be saved to:`). If you cannot find it later, search for it:
+
+```bash
+find ~ -name "miracast-sink*"
+```
 
 ## Part D: Check the laptop is back to normal
 

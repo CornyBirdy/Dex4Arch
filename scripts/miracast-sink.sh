@@ -37,6 +37,7 @@ STARTED=0          # set once something was changed and cleanup is needed
 CLEANED=0
 NM_CHANGED=0
 WPA_STOPPED=0
+WPA_MASKED=0
 FW_PORT_ADDED=0
 FW_DHCP_ADDED=0
 FW_STATE="not running"
@@ -70,6 +71,9 @@ wpa_dev()  { sudo --non-interactive wpa_cli -p "$CTRL_DIR" -i "$WDEV" "$@" 2>/de
 wpa_glob() { sudo --non-interactive wpa_cli -g "$GLOBAL" "$@" 2>/dev/null; }
 p2p_wdev_present() { iw dev 2>/dev/null | grep -q 'type P2P-device'; }
 miracle_wpa_alive() { pgrep -f 'wpa_supplicant.*[/]run/miracle' >/dev/null 2>&1; }
+# The NetworkManager-owned wpa_supplicant runs in D-Bus mode (-u) and is not under /run/miracle.
+system_wpa_alive() { pgrep -f '^[^ ]*wpa_supplicant .*-u' >/dev/null 2>&1; }
+step() { echo "STEP $(date +%s) $*" >> "$LOG"; }
 
 [ "$EUID" -ne 0 ] || die "Run as a normal user, not root (the video window needs your desktop session)."
 
@@ -120,12 +124,13 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
          "ufw=$(systemctl is-active ufw 2>/dev/null)"
     echo "wpa_supplicant processes:"
     pgrep --list-full --exact wpa_supplicant 2>/dev/null | cut -c1-110 | sed 's/^/  /' || true
+    echo "D-Bus mode wpa_supplicant (NetworkManager) running: $(yesno system_wpa_alive)"
     echo "P2P-device wdev present now: $(yesno p2p_wdev_present)"
     echo "miracle-wifid already running: $(yesno pgrep --exact miracle-wifid)"
     echo "missing GStreamer elements:$(missing_gst)"
     echo "DISPLAY=${DISPLAY:-unset} Xauthority file found: $(yesno test -r "${XAUTHORITY:-$HOME/.Xauthority}")"
     echo "rfkill: $(rfkill list wifi 2>/dev/null | grep -ciE 'blocked: yes') blocked entries"
-    echo "A real run would: unmanage $IFACE in NetworkManager, stop wpa_supplicant.service,"
+    echo "A real run would: unmanage $IFACE in NetworkManager, stop and runtime-mask wpa_supplicant.service,"
     echo "start miracle-wifid, open UDP 7236 + DHCP in firewalld if it is running, and undo all of it on exit."
     echo "======================================================"
     exit 0
@@ -138,6 +143,7 @@ live_state() {
     # Collected while miracle-wifid is still running.
     local peers n=0 wfd=0 mac info name line
     LIVE_WIFID="$(yesno pgrep --exact miracle-wifid)"
+    LIVE_SYSWPA="$(yesno system_wpa_alive)"
     LIVE_WPA="$(yesno miracle_wpa_alive)"
     LIVE_WDEV="$(yesno p2p_wdev_present)"
     LIVE_P2P_STATE="$(wpa_glob status | sed -n 's/^p2p_state=//p')"
@@ -171,17 +177,22 @@ append_journals() {
 }
 
 print_report() {
-    local fw peak errs kern
+    local fw peak errs kern syswpa steps
     fw="$(sudo journalctl --dmesg --boot --output=cat --no-pager 2>/dev/null | grep -m 1 -oE 'firmware ver [^ ]+' || true)"
+    syswpa="$(grep -c 'sys_wpa=yes' "$LOG" 2>/dev/null || true)"
+    steps="$(grep -oE '^STEP [0-9]+ [a-z0-9-]+' "$LOG" 2>/dev/null | awk '{print $3}' | tr '\n' ' ')"
     peak="$(grep -oE 'peers=[0-9]+' "$LOG" 2>/dev/null | cut -d= -f2 | sort -n | tail -n 1)"
     errs="$(sed -n '/^===== wpa_supplicant/,/^===== player/p' "$LOG" | grep -iE 'fail|error|not supported|could not|unable|denied|busy' | sort -u)"
     kern="$(sed -n '/^===== kernel/,/^===== miracle-wifictl/p' "$LOG" | grep -vE '^=====' || true)"
     echo "================ MIRACAST SINK REPORT ================"
     echo "run $(( $(date +%s) - START_EPOCH )) s as \"$NAME\" | ${fw:-firmware ver unknown}"
     static_facts
+    echo "steps reached: ${steps:-none}"
     echo "before start: system wpa_supplicant stopped=$([ "$WPA_STOPPED" -eq 1 ] && echo yes || echo no)" \
+         "masked=$([ "$WPA_MASKED" -eq 1 ] && echo yes || echo no)" \
          "| stale P2P-device wdev=$STALE_P2P | firewalld=$FW_STATE"
     echo "at exit: wifid alive=${LIVE_WIFID:-?} | its wpa_supplicant alive=${LIVE_WPA:-?} | link=${LINK_ID:-none}"
+    echo "system (NetworkManager) wpa_supplicant: alive at exit=${LIVE_SYSWPA:-?} | samples where it was alive=${syswpa:-0}"
     echo "at exit: P2P-device wdev=${LIVE_WDEV:-?} | p2p_state=${LIVE_P2P_STATE:-none}" \
          "| wifi_display=${LIVE_WFD:-none} | wfd_subelem0=${LIVE_SUBELEM:-none}"
     echo "P2P peers seen by laptop: at exit=${LIVE_PEERS:-?} (with WFD info=${LIVE_PEERS_WFD:-?}) | peak=${peak:-0}"
@@ -216,6 +227,7 @@ cleanup() {
     sudo pkill -f 'wpa_supplicant.*[/]run/miracle' 2>/dev/null || true
     if [ "$FW_PORT_ADDED" -eq 1 ]; then sudo firewall-cmd --quiet --remove-port=7236/udp 2>/dev/null || true; fi
     if [ "$FW_DHCP_ADDED" -eq 1 ]; then sudo firewall-cmd --quiet --remove-service=dhcp 2>/dev/null || true; fi
+    if [ "$WPA_MASKED" -eq 1 ]; then sudo systemctl unmask --runtime --quiet wpa_supplicant.service 2>/dev/null || true; fi
     if [ "$WPA_STOPPED" -eq 1 ]; then sudo systemctl start wpa_supplicant.service 2>/dev/null || true; fi
     if [ "$NM_CHANGED" -eq 1 ]; then
         nmcli device set "$IFACE" managed yes 2>/dev/null || true
@@ -239,6 +251,8 @@ say "Using Wi-Fi interface: $IFACE. Wi-Fi will drop now and come back when this 
 sudo --validate || die "sudo is required."
 : > "$LOG"
 STARTED=1
+step start
+say "Report will be saved to: $REPORT"
 
 if pgrep --exact miracle-wifid >/dev/null 2>&1; then
     say "A miracle-wifid from an earlier run is still active. Stopping it."
@@ -249,12 +263,22 @@ fi
 NM_CHANGED=1
 nmcli device set "$IFACE" managed no || die "Could not release $IFACE from NetworkManager."
 
+step nm-released
 # miracle-wifid starts its own wpa_supplicant on the interface. The system one is
-# stopped so that it cannot keep the P2P device of this adapter.
-if systemctl is-active --quiet wpa_supplicant.service; then
-    say "Stopping the system wpa_supplicant service (restarted on exit)."
+# stopped so that it cannot keep the P2P device of this adapter. NetworkManager
+# starts it again on demand through D-Bus, so it is also masked with --runtime
+# (lives in /run, gone after a reboot) and unmasked on exit.
+if systemctl is-active --quiet wpa_supplicant.service || system_wpa_alive; then
+    say "Stopping the system wpa_supplicant service (restored on exit)."
+    if sudo systemctl mask --runtime --quiet wpa_supplicant.service; then WPA_MASKED=1; fi
     if sudo systemctl stop wpa_supplicant.service; then WPA_STOPPED=1; fi
+    sleep 1
+    if system_wpa_alive; then
+        say "The system wpa_supplicant is still running. Stopping that process."
+        sudo pkill -f '^[^ ]*wpa_supplicant .*-u' || true
+    fi
 fi
+step wpa-stopped
 sleep 1
 STALE_P2P="$(yesno p2p_wdev_present)"
 if [ "$STALE_P2P" = yes ]; then
@@ -277,6 +301,7 @@ fi
 # setsid keeps the daemon out of this terminal's Ctrl+C so the report can still
 # query it. wpa_supplicant output goes to the journal (collected on exit).
 say "Starting miracle-wifid..."
+step wifid-start
 sudo env MC_LOG="$LOG" MC_IFACE="$IFACE" sh -c \
     'exec setsid miracle-wifid --interface "$MC_IFACE" --log-level debug --log-date-time --wpa-loglevel info >> "$MC_LOG" 2>&1' &
 
@@ -290,6 +315,7 @@ if [ -z "$LINK_ID" ]; then
     die "miracle-wifid did not list $IFACE as a link."
 fi
 say "Link id: $LINK_ID"
+step link-found
 
 sudo miracle-wifictl set-managed "$LINK_ID" yes || say "set-managed reported an error (continuing)."
 
@@ -300,6 +326,7 @@ for _ in $(seq 1 30); do
 done
 if sudo test -S "$CTRL_DIR/p2p-dev-$IFACE"; then WDEV="p2p-dev-$IFACE"; fi
 if [ "$READY" = yes ]; then
+    step p2p-ready
     say "wpa_supplicant is up with P2P (control interface: $WDEV)."
 else
     say "wpa_supplicant did not report a P2P state within 15 s. Continuing so the report shows why."
@@ -313,7 +340,8 @@ sudo miracle-wifictl set-friendly-name "$LINK_ID" "$NAME" || say "Could not set 
     while :; do
         peers="$(wpa_dev p2p_peers | grep -cE "^$MAC_RE$" || true)"
         state="$(wpa_glob status | sed -n 's/^p2p_state=//p')"
-        echo "SAMPLE $(date +%s) p2p_state=${state:-none} peers=${peers:-0}" >> "$LOG"
+        sys="$(yesno system_wpa_alive)"
+        echo "SAMPLE $(date +%s) p2p_state=${state:-none} peers=${peers:-0} sys_wpa=$sys" >> "$LOG"
         sleep 5
     done
 ) &
@@ -331,6 +359,7 @@ MSG
 
 # Foreground: runs the sink until Ctrl+C. Root is required, so the X11 display
 # variables are passed explicitly for the video window.
+step sink-run
 SINK_ENV=("DISPLAY=${DISPLAY:-:0}" "XAUTHORITY=${XAUTHORITY:-$HOME/.Xauthority}")
 if [ "$AUDIO" -eq 1 ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
     SINK_ENV+=("XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR")
