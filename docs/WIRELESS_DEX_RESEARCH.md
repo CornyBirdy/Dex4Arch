@@ -2,6 +2,8 @@
 
 **Goal:** Tap Wireless DeX on a Samsung phone and get DeX on a Linux PC, with the PC acting as a Miracast receiver (Wi-Fi Direct sink).
 
+For a single guided test run, follow `docs/MIRACAST_BETA_GUIDE.md`.
+
 **Status: unproven.** On the test laptop (Qualcomm Atheros QCA9377, `ath10k_pci`) the phone has not yet discovered the PC. Nothing in this document is confirmed to work end to end.
 
 Work is ordered in two stages, and the second does not start before the first works:
