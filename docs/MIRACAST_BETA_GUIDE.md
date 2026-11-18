@@ -60,6 +60,8 @@ git log --oneline --max-count=3
 sudo pacman -S --needed python-gobject gtk3 gst-plugins-base gst-libav libnotify
 ```
 
+Also look at the line starting with `resolution offered:`. It shows the laptop screen size the script detected and the mode the phone is asked to use, for example `preferred VESA 1366x768p60`.
+
 ## Part C: Run the receiver (Wi-Fi goes down)
 
 **Step 6.** Start the receiver. **The laptop's Wi-Fi drops now** and comes back when the session ends.
@@ -88,6 +90,18 @@ Enter your sudo password when asked. Wait for `Receiver "Arch-Miracast" is ready
 | Click the picture | Control the phone again |
 | F11 | Leave or enter full screen |
 | Ctrl+Q | Close the viewer and end the session |
+
+### Resolution
+
+By default the script offers the phone only the resolutions that fit the laptop screen, and marks the screen's own size as preferred. Options if the result is not right:
+
+| Command | Effect |
+| --- | --- |
+| `./scripts/miracast-sink.sh --max-fps 30` | Offer 30 fps modes only. Lighter on the laptop's CPU if the picture stutters. |
+| `./scripts/miracast-sink.sh --res 1280x720` | Offer modes up to 1280x720. Try this if the phone refuses the screen's own size. |
+| `./scripts/miracast-sink.sh --res all` | Offer everything up to 1920x1080, as before. |
+
+The resolution the phone actually chose appears in the report, on the `viewer: start:` line.
 
 ## Part D: End the session
 
@@ -129,7 +143,8 @@ If you move the project folder, run the install command again.
 1. Whether the laptop showed the **DeX desktop** or only **mirrored** the phone screen.
 2. Whether the mouse moved the pointer on the phone, and whether clicking, right-clicking, scrolling and typing worked.
 3. A photo of the report, especially the `viewer:` lines.
-4. Whether the picture was smooth or laggy.
+4. Whether the picture was smooth or laggy, and whether it filled the screen sharply.
+5. The `resolution offered:` line and the `viewer: start:` line from the report.
 
 Do not send `miracast-sink.log`. It contains real MAC addresses. Only the report has them removed.
 

@@ -20,6 +20,9 @@
 #   --check          read-only preflight: prints facts, changes nothing, Wi-Fi stays up
 #   --no-audio       do not play the phone's audio on the laptop
 #   --no-input       plain MiracleCast player: no full screen viewer, no mouse/keyboard
+#   --res MODE       resolution offered to the phone: auto (default, fits this
+#                    screen), WxH (for example 1280x720), or all (MiracleCast default)
+#   --max-fps N      highest frame rate offered: 60 (default) or 30 (lighter on the CPU)
 #   --pause-at-exit  wait for Enter before the window closes (used by the menu launcher)
 #
 # Stop:   close the viewer (Ctrl+Alt to release the mouse, then Ctrl+Q), or type
@@ -35,6 +38,9 @@ NAME="Arch-Miracast"
 AUDIO=1
 INPUT=1
 PAUSE_AT_EXIT=0
+RES_MODE="auto"
+MAX_FPS=60
+RES_INFO="MiracleCast default"
 CHECK_ONLY=0
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 CONF_HOME=""
@@ -66,9 +72,11 @@ while [ $# -gt 0 ]; do
         --audio) AUDIO=1; shift ;;
         --no-audio) AUDIO=0; shift ;;
         --no-input) INPUT=0; shift ;;
+        --res) RES_MODE="${2:-}"; shift 2 ;;
+        --max-fps) MAX_FPS="${2:-}"; shift 2 ;;
         --pause-at-exit) PAUSE_AT_EXIT=1; shift ;;
         --check) CHECK_ONLY=1; shift ;;
-        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -104,6 +112,131 @@ fi
 IFINDEX="$(cat "/sys/class/net/$IFACE/ifindex")"
 GLOBAL="$CTRL_DIR/$IFACE-$IFINDEX.global"
 WDEV="$IFACE"
+
+# --- Resolution advertised to the phone ---------------------------------------
+# Wi-Fi Display resolution tables (WFD 1.0, as in MiracleCast src/ctl/wfd.c):
+# table index width height fps interlaced. Table 0 = CEA, 1 = VESA, 2 = HH.
+WFD_MODES='0 0 640 480 60 0
+0 1 720 480 60 0
+0 2 720 480 60 1
+0 3 720 576 50 0
+0 4 720 576 50 1
+0 5 1280 720 30 0
+0 6 1280 720 60 0
+0 7 1920 1080 30 0
+0 8 1920 1080 60 0
+0 9 1920 1080 60 1
+0 10 1280 720 25 0
+0 11 1280 720 50 0
+0 12 1920 1080 25 0
+0 13 1920 1080 50 0
+0 14 1920 1080 50 1
+0 15 1280 720 24 0
+0 16 1920 1080 24 0
+1 0 800 600 30 0
+1 1 800 600 60 0
+1 2 1024 768 30 0
+1 3 1024 768 60 0
+1 4 1152 854 30 0
+1 5 1152 854 60 0
+1 6 1280 768 30 0
+1 7 1280 768 60 0
+1 8 1280 800 30 0
+1 9 1280 800 60 0
+1 10 1360 768 30 0
+1 11 1360 768 60 0
+1 12 1366 768 30 0
+1 13 1366 768 60 0
+1 14 1280 1024 30 0
+1 15 1280 1024 60 0
+1 16 1440 1050 30 0
+1 17 1440 1050 60 0
+1 18 1440 900 30 0
+1 19 1440 900 60 0
+1 20 1600 900 30 0
+1 21 1600 900 60 0
+1 22 1600 1200 30 0
+1 23 1600 1200 60 0
+1 24 1680 1024 30 0
+1 25 1680 1024 60 0
+1 26 1680 1050 30 0
+1 27 1680 1050 60 0
+1 28 1920 1200 30 0
+2 0 800 480 30 0
+2 1 800 480 60 0
+2 2 854 480 30 0
+2 3 854 480 60 0
+2 4 864 480 30 0
+2 5 864 480 60 0
+2 6 640 360 30 0
+2 7 640 360 60 0
+2 8 960 540 30 0
+2 9 960 540 60 0
+2 10 848 480 30 0
+2 11 848 480 60 0'
+
+# Prints the current screen size as WxH: the primary output, else the first
+# active one, else the whole X screen.
+detect_screen() {
+    local s=""
+    if have xrandr; then
+        s="$(xrandr --current 2>/dev/null | awk '/ connected primary [0-9]+x[0-9]+/ {for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+x[0-9]+\+/) {split($i, a, "+"); print a[1]; exit}}')"
+        [ -n "$s" ] || s="$(xrandr --current 2>/dev/null | awk '/ connected [0-9]+x[0-9]+\+/ || / connected [a-z]+ [0-9]+x[0-9]+\+/ {for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+x[0-9]+\+/) {split($i, a, "+"); print a[1]; exit}}')"
+    fi
+    if [ -z "$s" ] && have xdpyinfo; then
+        s="$(xdpyinfo 2>/dev/null | awk '/dimensions:/ {print $2; exit}')"
+    fi
+    echo "$s"
+}
+
+# Prints "native cea vesa hh" (hex) for a screen of W x H and a frame rate limit:
+# every progressive mode that fits is offered, and the one with the most pixels
+# per second is marked as the native mode the phone should prefer.
+# CEA 640x480p60 is always offered because the specification makes it mandatory.
+wfd_formats_for() {
+    echo "$WFD_MODES" | awk -v W="$1" -v H="$2" -v F="$3" '
+        BEGIN { use[0, 0] = 1; best = -1 }
+        $6 == 0 && $3 <= W && $4 <= H && $5 <= F {
+            use[$1, $2] = 1
+            score = $3 * $4 * $5          # pixels per second: 1080p60 beats 1200p30
+            if (score > best) { best = score; nt = $1; ni = $2 }
+        }
+        END {
+            for (t = 0; t < 3; t++) { m[t] = 0; for (i = 0; i < 32; i++) if ((t, i) in use) m[t] += 2 ^ i }
+            native = (best < 0) ? 0 : ni * 8 + nt
+            printf "%02x %08x %08x %08x\n", native, m[0], m[1], m[2]
+        }'
+}
+
+# Describes a native byte, for example "VESA 1366x768p60".
+wfd_native_name() {
+    local n=$((16#$1))
+    echo "$WFD_MODES" | awk -v t=$((n % 8)) -v i=$((n / 8)) '
+        $1 == t && $2 == i { split("CEA VESA HH", name, " "); printf "%s %dx%dp%d\n", name[t + 1], $3, $4, $5 }'
+}
+
+# Sets VIDEO_FORMATS (empty = MiracleCast default) and RES_INFO from --res.
+VIDEO_FORMATS=""
+resolve_formats() {
+    local w h screen f native cea vesa hh
+    case "$RES_MODE" in
+        all) RES_INFO="all modes up to 1920x1080 (MiracleCast default)"; return ;;
+        auto)
+            screen="$(detect_screen)"
+            if [[ ! "$screen" =~ ^[0-9]+x[0-9]+$ ]]; then
+                RES_INFO="screen size not detected, using MiracleCast default"
+                return
+            fi
+            w="${screen%x*}"; h="${screen#*x}" ;;
+        *) w="${RES_MODE%x*}"; h="${RES_MODE#*x}"; screen="$RES_MODE" ;;
+    esac
+    read -r native cea vesa hh <<< "$(wfd_formats_for "$w" "$h" "$MAX_FPS")"
+    VIDEO_FORMATS="$native 00 03 10 $cea $vesa $hh 00 0000 0000 10 none none"
+    RES_INFO="screen $screen, up to ${MAX_FPS} fps, preferred $(wfd_native_name "$native") (cea=$cea vesa=$vesa hh=$hh)"
+}
+
+[[ "$MAX_FPS" =~ ^[0-9]+$ ]] || die "--max-fps needs a number, for example 30."
+[[ "$RES_MODE" =~ ^(auto|all|[0-9]+x[0-9]+)$ ]] || die "--res must be auto, all, or WxH (for example 1280x720)."
 
 # --- Facts that can be collected without changing anything ---------------------
 missing_gst() {
@@ -158,6 +291,8 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
     echo "miracle-wifid already running: $(yesno pgrep --exact miracle-wifid)"
     echo "missing GStreamer elements:$(missing_gst)"
     echo "viewer: $(viewer_check)"
+    resolve_formats
+    echo "resolution offered: $RES_INFO"
     echo "DISPLAY=${DISPLAY:-unset} Xauthority file found: $(yesno test -r "${XAUTHORITY:-$HOME/.Xauthority}")"
     echo "rfkill: $(rfkill list wifi 2>/dev/null | grep -ciE 'blocked: yes') blocked entries"
     echo "A real run would: unmanage $IFACE in NetworkManager, stop and runtime-mask wpa_supplicant.service,"
@@ -218,6 +353,7 @@ print_report() {
     echo "run $(( $(date +%s) - START_EPOCH )) s as \"$NAME\" | ${fw:-firmware ver unknown}"
     static_facts
     echo "steps reached: ${steps:-none}"
+    echo "resolution offered: $RES_INFO"
     echo "before start: system wpa_supplicant stopped=$([ "$WPA_STOPPED" -eq 1 ] && echo yes || echo no)" \
          "masked=$([ "$WPA_MASKED" -eq 1 ] && echo yes || echo no)" \
          "| stale P2P-device wdev=$STALE_P2P | firewalld=$FW_STATE"
@@ -403,18 +539,27 @@ MSG
 SINK_ARGS=(--audio "$AUDIO")
 SINK_ENV=("DISPLAY=${DISPLAY:-:0}" "XAUTHORITY=${XAUTHORITY:-$HOME/.Xauthority}" "MIRACAST_USER=$USER")
 if [ -n "${MIRACAST_PYTHON:-}" ]; then SINK_ENV+=("MIRACAST_PYTHON=$MIRACAST_PYTHON"); fi
+resolve_formats
+CONF_LINES=()
+if [ -n "$VIDEO_FORMATS" ]; then
+    # Same layout as MiracleCast's default wfd_video_formats; only the native
+    # mode and the resolution masks differ.
+    CONF_LINES+=("extends.wfd_video_formats=$VIDEO_FORMATS")
+fi
 if [ "$INPUT" -eq 1 ]; then
+    CONF_LINES+=("external-player=$SCRIPT_DIR/miracast-player.sh")
+    CONF_LINES+=("extends.wfd_uibc_capability=input_category_list=HIDC;generic_cap_list=none;hidc_cap_list=Keyboard/USB, Mouse/USB;port=none")
+    SINK_ARGS+=(--uibc)
+fi
+if [ "${#CONF_LINES[@]}" -gt 0 ]; then
     CONF_HOME="$(mktemp -d "${TMPDIR:-/tmp}/miracast-conf.XXXXXX")"
-    cat > "$CONF_HOME/.miraclecastrc" <<CONF
-[sinkctl]
-external-player=$SCRIPT_DIR/miracast-player.sh
-extends.wfd_uibc_capability=input_category_list=HIDC;generic_cap_list=none;hidc_cap_list=Keyboard/USB, Mouse/USB;port=none
-CONF
+    { echo "[sinkctl]"; printf '%s\n' "${CONF_LINES[@]}"; } > "$CONF_HOME/.miraclecastrc"
     chmod 755 "$CONF_HOME"
     chmod 644 "$CONF_HOME/.miraclecastrc"
     SINK_ENV+=("HOME=$CONF_HOME")
-    SINK_ARGS+=(--uibc)
 fi
+say "Resolution offered to the phone: $RES_INFO"
+echo "RESOLUTION $RES_INFO" >> "$LOG"
 
 step sink-run
 sudo env "${SINK_ENV[@]}" miracle-sinkctl "${SINK_ARGS[@]}" run "$LINK_ID"

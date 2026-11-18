@@ -99,6 +99,16 @@ The packet format was checked against a local test listener only. Whether Samsun
 
 Closing the viewer ends the session: the player wrapper sends SIGTERM to `miracle-sinkctl`, which exits, and the main script restores Wi-Fi. `Ctrl+C` is not a reliable way to stop, because `miracle-sinkctl` handles SIGINT by clearing its input line (`src/ctl/ctl-cli.c`, `cli_signal_fn`).
 
+### Resolution
+
+MiracleCast offers every CEA, VESA and HH mode up to 1920x1080 by default, so the phone picks 1080p. `miracast-sink.sh --res auto` (the default) reads the screen size with `xrandr` (primary output) and writes `extends.wfd_video_formats` into the temporary config. It uses the same layout as MiracleCast's default string, with only the native mode byte and the three masks changed:
+
+- every progressive mode that fits the screen and the frame rate limit (`--max-fps`, default 60) is offered; interlaced modes are left out;
+- CEA 640x480p60 is always offered, because the specification makes it mandatory;
+- the native byte (bits 7..3 index, bits 2..0 table) names the fitting mode with the most pixels per second, for example `0x69` = VESA index 13 = 1366x768p60.
+
+Whether the phone follows the native mode, or still picks another offered mode such as 1280x720, is not verified. `--res WxH` and `--res all` override the detection.
+
 `scripts/install-launcher.sh` adds a desktop menu entry that runs the receiver in a terminal.
 
 ## DeX stage: open questions and leads
